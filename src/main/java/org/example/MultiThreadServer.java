@@ -1,8 +1,8 @@
 package org.example;
 
 import jakarta.annotation.PostConstruct;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -16,18 +16,30 @@ import java.net.SocketTimeoutException;
 import java.util.NoSuchElementException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class MultiThreadServer {
     @Value("${server.port}")
     private int serverPort;
 
-    private static final ExecutorService EXECUTOR_SERVICE = Executors.newFixedThreadPool(10);
+    @Value("${thread.number}")
+    private int threadNumber;
+
+    private ExecutorService executorService;
+
+    private final CarDAO dao;
+
+    @Autowired
+    public MultiThreadServer(CarDAO dao) {
+        this.dao = dao;
+    }
 
     @PostConstruct
     public void init() {
+        this.executorService = Executors.newFixedThreadPool(threadNumber);
         connectServer();
     }
 
@@ -38,12 +50,12 @@ public class MultiThreadServer {
             while (!serverSocket.isClosed()) {
                 final Socket clientSocket = serverSocket.accept();
                 clientSocket.setSoTimeout(20000);
-                EXECUTOR_SERVICE.execute(()->handleClient(clientSocket));
+                executorService.execute(() -> handleClient(clientSocket));
             }
         } catch (IOException e) {
             log.error("Ошибка при работе сервера: " + e.getMessage());
         } finally {
-            EXECUTOR_SERVICE.shutdown();
+            executorService.shutdown();
         }
     }
 
@@ -51,12 +63,16 @@ public class MultiThreadServer {
         try (PrintWriter writer = new PrintWriter(clientSocket.getOutputStream());
              BufferedReader reader = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()))) {
             log.info("Запрос на подключение от клиента");
+            handshakingResponse(writer);
             while (!clientSocket.isClosed()) {
-                handshakingResponse(writer);
-                processClientRequest(readClientRequest(reader));
-                clientSocket.close();
-                log.info("Поток освобождается");
+                long number = readClientRequest(reader);
+                if (number == 0) {
+                    clientSocket.close();
+                } else {
+                    processClientRequest(number, writer);
+                }
             }
+            log.info("Поток освободился");
         } catch (SocketTimeoutException e) {
             log.error("Соединение закрыто из-за таймаута: " + e.getMessage());
         } catch (IOException | InterruptedException e) {
@@ -65,10 +81,8 @@ public class MultiThreadServer {
     }
 
     private void handshakingResponse(PrintWriter writer) {
-        writer.println("HTTP/1.1 200 OK");
-        writer.println("Content-Type: text/plain; charset=utf-8");
-        writer.println();
         writer.println("Сервер готов к работе");
+        writer.flush();
     }
 
     private long readClientRequest(BufferedReader reader) throws IOException {
@@ -76,13 +90,18 @@ public class MultiThreadServer {
         long request = 0;
         try {
             if (inputLine == null || inputLine.isEmpty()) throw new NoSuchElementException();
+            Pattern pattern = Pattern.compile("\\b[\\d]+\\b");
+            Matcher matcher = pattern.matcher(inputLine);
+            if (matcher.find()) {
+                inputLine = matcher.group();
+            }
             request = Integer.parseInt(inputLine);
             if (request < 0) throw new NumberFormatException();
             request *= 1000;
         } catch (NoSuchElementException e) {
             log.error("Клиент не передал данные: " + e.getMessage());
             return request;
-        } catch(NumberFormatException e) {
+        } catch (NumberFormatException e) {
             log.error("Клиент передал некорректные данные: " + e.getMessage());
             return request;
         }
@@ -90,9 +109,13 @@ public class MultiThreadServer {
         return request;
     }
 
-    private void processClientRequest(long seconds) throws InterruptedException {
-        log.info("Поток засыпает на " + seconds + " миллисекунд");
-        Thread.sleep(seconds);
+    private void processClientRequest(long milliseconds, PrintWriter writer) throws InterruptedException {
+        log.info("Поток засыпает на " + milliseconds + " миллисекунд");
+        Thread.sleep(milliseconds);
         log.info("Поток просыпается");
+        String car = dao.getCar(milliseconds);
+        writer.println("Сервер возвращает: " + car);
+        writer.println("Сервер готов принять новый запрос");
+        writer.flush();
     }
 }
